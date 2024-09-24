@@ -145,7 +145,7 @@ class PFR_ethane:
         # Solve ODE
         if self.model=='exact':
             # Initial state
-            Initial = np.array([N1o, 0, N1o*1.2, 0, 0, 0, 0, N8o])
+            Initial = np.array([N1o, 0, 0, 0, 0, 0, 0, N8o])
             sol = solve_ivp(lambda v, x: self.exact(v, x), 
                                  [v[0], v[-1]], 
                                  Initial,
@@ -158,6 +158,7 @@ class PFR_ethane:
             self.ethylene = sol.y[5, :]
             self.vol = sol.t
             self.conversion = (self.ethane[0] - self.ethane[-1])/self.ethane[0]
+            self.y = (self.ethylene[-1] - self.ethylene[0])/self.ethane[0]
             
         if self.model=='QSSA':
             Initial = np.array([N1o, 0, 0, 0, N8o])
@@ -173,6 +174,7 @@ class PFR_ethane:
             self.vol = sol.t
             self.solution = sol
             self.conversion = (self.ethane[0] - self.ethane[-1])/self.ethane[0]
+            self.y = (self.ethylene[-1] - self.ethylene[0])/self.ethane[0]
             
             
         if self.model=='simple':
@@ -189,6 +191,7 @@ class PFR_ethane:
             self.vol = sol.t
             self.solution = sol
             self.conversion = (self.ethane[0] - self.ethane[-1])/self.ethane[0]
+            self.y = (self.ethylene[-1] - self.ethylene[0])/self.ethane[0]
     
 
     def make_plots(self):
@@ -317,17 +320,17 @@ for f in v_array:
     PFR_exact = PFR_ethane(V, model='exact', Q=Q, P=P, feed=[f, 760-f])
     PFR_exact.rate_constants()
     PFR_exact.reactor()
-    exact_X.append(PFR_exact.conversion)
+    exact_X.append(PFR_exact.y)
 
     PFR_QSSA = PFR_ethane(V, model='QSSA', Q=Q, P=P, feed=[f, 760-f])
     PFR_QSSA.rate_constants()
     PFR_QSSA.reactor()
-    QSSA_X.append(PFR_QSSA.conversion)
+    QSSA_X.append(PFR_QSSA.y)
 
     PFR_simple = PFR_ethane(V, model='simple', Q=Q, P=P, feed=[f, 760-f])
     PFR_simple.rate_constants()
     PFR_simple.reactor()
-    simple_X.append(PFR_simple.conversion)
+    simple_X.append(PFR_simple.y)
 
 plt.figure(figsize=(10,7))
 plt.title('Flow-rate variation')
@@ -344,29 +347,45 @@ plt.legend()
 
 #%% Temperature variation
 
-v_array = np.linspace(750, 1000, 100)
+v_array = np.linspace(500, 2000, 100)
 v_array = v_array[1:]
 exact_X = []
 QSSA_X = []
 simple_X = []
-V = 100
-Q = 35
+V = 1000
+Q = 350
 
 for T in v_array:
     PFR_exact = PFR_ethane(V, model='exact', Q=Q, T=T)
     PFR_exact.rate_constants(T)
     PFR_exact.reactor()
-    exact_X.append(PFR_exact.conversion)
+    exact_X.append(PFR_exact.y)
 
     PFR_QSSA = PFR_ethane(V, model='QSSA', Q=Q, T=T)
     PFR_QSSA.rate_constants(T)
     PFR_QSSA.reactor()
-    QSSA_X.append(PFR_QSSA.conversion)
+    QSSA_X.append(PFR_QSSA.y)
 
     PFR_simple = PFR_ethane(V, model='simple', Q=Q, T=T)
     PFR_simple.rate_constants(T)
     PFR_simple.reactor()
-    simple_X.append(PFR_simple.conversion)
+    simple_X.append(PFR_simple.y)
+    
+    
+    # plt.figure(figsize=(10,7))
+    # plt.title('Ethane pyrolysis comparison')
+    # plt.plot(PFR_QSSA.vol, PFR_QSSA.ethane, '--', color='r', label='QSSA ethane')
+    # plt.plot(PFR_exact.vol, PFR_exact.ethane, color='r', label='Exact ethane')
+    # plt.plot(PFR_QSSA.vol, PFR_QSSA.ethylene, '--', color='b', label='QSSA ethylene')
+    # plt.plot(PFR_exact.vol, PFR_exact.ethylene, color='b', label='Exact ethylene')
+    # # plt.plot(PFR_simple.vol, PFR_QSSA.ethane, '--', color='r', label='Simple ethane')
+    # # plt.plot(PFR_simple.vol, PFR_QSSA.ethylene, '--', color='b', label='Simple ethylene')
+
+    # plt.ylabel('Molar flow rate (mol/s)')
+    # plt.xlabel('volume ($cm^3$)')
+    # plt.xlim(0,V)
+    # plt.legend()
+    
 
 plt.figure(figsize=(10,7))
 plt.title('Temperature variation')
@@ -374,8 +393,8 @@ plt.plot(v_array, exact_X, color='r', label='Exact model')
 plt.plot(v_array, QSSA_X, color='b', label='QSSA model')
 plt.plot(v_array, simple_X, color='k', label='simple model')
 
-plt.ylabel(r'Conversion of $C_2H_6$')
-# plt.xlabel('volume ($cm^3$)')
+# plt.ylabel(r'Conversion of $C_2H_6$')
+plt.ylabel('Ethylene yield')
 plt.xlabel('Temperature (K)')
 plt.legend()
 
@@ -658,8 +677,68 @@ ax.view_init(30, 30)
 
 
 
+#%% Enzyme
 
 
+def exact(t, x, k):
+    """S0, ES0, ES1, S1, S2, E"""
+    
+    kf1, kr1, kcat1, kf2, kr2, kcat2 = k
+    
+    dS0 = -kf1*x[5]*x[0] + kr1*x[1]
+    dES0 = kf1*x[5]*x[0] - (kf1 + kcat1)*x[1]
+    dES1 = kcat1*x[1] - (kr2 + kcat2)*x[2] + kf2*x[5]*x[3]
+    dS1 = -kf2 * x[5] * x[3] + kr2*x[2]
+    dS2 = kcat2 * x[2] 
+    dE = -kf1*x[5]*x[0] + kr1*x[1] -kf2*x[5]*x[3] + kr2*x[2] + kcat2*x[2]
+    
+    return np.array([dS0, dES0, dES1, dS1, dS2, dE])
+
+
+E = 5
+def QSSA(t, x, k):
+    
+    kf1, kr1, kcat1, kf2, kr2, kcat2 = k
+    
+    k1 = E*kf1*kcat1/(kr1 + kcat1)
+    k2 = E*kf2*kcat2/(kr2 + kcat2) 
+    p = kcat2/(kr2 + kcat2)
+    
+    dS0 = -k1*x[0]
+    dS1 = k1*(1-p)*x[0] - k2*x[1]
+    dS2 = k1*p*x[0] + k2*x[1]
+    return np.array([dS0, dS1, dS2])
+
+
+p = [0.71, 19, 6700, 9200,0.97, 5200]
+
+Initial = np.array([10,0,0,0,0,E])
+
+sol = solve_ivp(lambda t, x: exact(t, x, p), 
+                     [0, 10], 
+                     Initial,
+                     method='BDF', 
+                     atol=np.sqrt(np.finfo(float).eps), 
+                     rtol=np.sqrt(np.finfo(float).eps))
+
+Initial2 = np.array([10, 0, 0])
+sol2 = solve_ivp(lambda t, x: QSSA(t, x, p), 
+                     [0, 10], 
+                     Initial2,
+                     method='BDF', 
+                     atol=np.sqrt(np.finfo(float).eps), 
+                     rtol=np.sqrt(np.finfo(float).eps))
+
+
+
+plt.figure()
+plt.plot(sol.t, sol.y[0], label='S0')
+plt.plot(sol.t, sol.y[3], label='S1')
+plt.plot(sol.t, sol.y[4], label='S2')
+
+plt.plot(sol2.t, sol2.y[0], linestyle='--', label='S0')
+plt.plot(sol2.t, sol2.y[1], linestyle='--', label='S1')
+plt.plot(sol2.t, sol2.y[2], linestyle='--', label='S2')
 
 
 
