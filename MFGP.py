@@ -52,7 +52,7 @@ class multifidelityGPR:
     ndim -> Problem dimensionality
     negate -> True if minimization problem
     """
-    def __init__(self, lf, hf, ndim=1, negate=False):
+    def __init__(self, lf, hf, ndim=1, negate=False, noise=0.1):
         self.LF = lf
         self.HF = hf
         self.multifidelity = MultiSourceFunctionWrapper([lf, hf])
@@ -61,39 +61,49 @@ class multifidelityGPR:
         self.fidelity_list = []
         self.ndim = ndim
         self.negate = negate
+        self.is_max = False
+        self.lf_noise = noise
 
-    def set_initial_data(self, n1, n2, bounds):
+    def set_initial_data(self, n1, n2, bounds, seed=12346):
         """
-        Create initial data
-        n1 -> Number of Low-fidelity points
-        n2 -> Number of High-fidelity points
-        bounds -> Input bounds
+        Initialize dataset for the model
+        
+        :n1: Number of Low-fidelity points
+        :n2: Number of High-fidelity points
+        :bounds: Problem bounds
+        :seed: random seed
         """
-        np.random.seed(12346)
+        np.random.seed(seed)
         x_low = np.random.rand(n1,self.ndim)
         x_high = x_low[:n2, :]
         y_low = self.multifidelity.f[0](x_low)
         y_high = self.multifidelity.f[1](x_high)
         self.x_array, self.y_array = convert_xy_lists_to_arrays([x_low, x_high], [y_low, y_high])
         self.n_init = n1+n2
-        self.n1 = n1
-        self.n2 = n2
+        self.bounds = bounds
         
         if self.ndim==1:
             # Bounds
             lb, ub = bounds
-            self.bounds = bounds
             x_plot = np.linspace(lb, ub, 500)[:, None]
             
         if self.ndim==2:
-            self.bounds = bounds
             x1_range = np.linspace(0, 1, 200)
             x2_range = np.linspace(0, 1, 200)
             # Create mesh grid from x1 and x2 ranges
             X1, X2 = np.meshgrid(x1_range, x2_range)
             x_plot = np.array([[x1, x2] for x1, x2 in zip(np.ravel(X1), np.ravel(X2))])
             self.X1, self.X2 = X1, X2
+        
+        else:
+           arrays = [np.linspace(0, 1, 10) for i in range(self.ndim)]
 
+           # Create meshgrid from the arrays
+           meshgrid = np.meshgrid(*arrays, indexing='ij')
+           
+           # Stack meshgrid and reshape to get an array of data points
+           x_plot = np.stack(meshgrid, axis=-1).reshape(-1, self.ndim)
+           
         self.x_plot = x_plot
         self.x_plot_low = np.concatenate([np.atleast_2d(x_plot), np.zeros((x_plot.shape[0], 1))], axis=1)
         self.x_plot_high = np.concatenate([np.atleast_2d(x_plot), np.ones((x_plot.shape[0], 1))], axis=1)
@@ -130,16 +140,16 @@ class multifidelityGPR:
 
         else:
             kern_low = GPy.kern.Matern52(self.ndim)
-            kern_low.lengthscale.constrain_bounded(0.01, 0.5)
+            kern_low.lengthscale.constrain_bounded(0.005, 0.5)
             
             kern_err = GPy.kern.Matern52(self.ndim)
-            kern_err.lengthscale.constrain_bounded(0.01, 0.5)
+            kern_err.lengthscale.constrain_bounded(0.005, 0.5)
         
         
         multi_fidelity_kernel = LinearMultiFidelityKernel([kern_low, kern_err])
         gpy_model = GPyLinearMultiFidelityModel(x_array, y_array, multi_fidelity_kernel, n_fidelities)
         
-        gpy_model.likelihood.Gaussian_noise.fix(0.1)
+        gpy_model.likelihood.Gaussian_noise.fix(self.lf_noise)
         gpy_model.likelihood.Gaussian_noise_1.fix(0)
         
         self.model = GPyMultiOutputWrapper(gpy_model, 2, 5, verbose_optimization=False)
@@ -157,11 +167,15 @@ class multifidelityGPR:
         self.n_hf_evals, self.n_lf_evals = 0,0
         self.iterates = []
         self.GP_iterates = []
+        self.n_iter = 0
+        self.min_hf_evals = 0
 
     
-    def run_bayes_loop(self, n_iter, min_hf_evals=1, conv_plot=False):
-        self.n_iter = n_iter
-        self.min_hf_evals = min_hf_evals
+    def run_bayes_loop(self, n_iter, min_hf_evals=1, plot_opt=False, plot_acq=False):
+        self.n_iter += n_iter
+        self.min_hf_evals += min_hf_evals
+        self.GP_iterates = list(self.GP_iterates)
+        self.iterates = list(self.iterates)
     
         for i in range(n_iter):
             self.iter = i+1
@@ -179,20 +193,15 @@ class multifidelityGPR:
             Y = np.vstack([self.model.Y, ynew])
             X = np.vstack([self.model.X, xnext])
             
-            if self.ndim==1:
+            if plot_acq:
                 self.plot_acquisition(xnext[0])
-            if self.ndim == 2:
-                self.plot_acquisition2D(xnext[0])
+        
             
             self.model.set_data(X, Y)
             
-            if self.ndim==1:
+            if plot_opt:
                 self.plot_optimization()
-            if self.ndim==2:
-                self.plot_optimization2D()
-            
-            
-            
+        
             self.model.optimize()
                 
 
@@ -227,14 +236,13 @@ class multifidelityGPR:
             X = np.vstack([self.model.X, np.array(np.hstack([best_mean_loc, 1]))])
             
             self.model.set_data(X, Y)
-            if self.ndim==1:
-                self.plot_optimization(label='Additional evaluation')
-            if self.ndim==2:
-                self.plot_optimization2D(label='Additional evaluation')
+            if plot_opt:
+                self.plot_optimization(label='Final evaluation')
+
             
             
         else:
-            self.min_hf_evals = 0
+            self.min_hf_evals -= min_hf_evals
 
         self.GP_iterates = np.array(self.GP_iterates)
         self.iterates = np.array(self.iterates)
@@ -253,177 +261,208 @@ class multifidelityGPR:
         if self.negate:
             self.true_model = -self.true_model
             self.max = -self.max
+        self.is_max =True
 
     def plot_acquisition(self, xnew):
-        plt.figure(figsize=(6.5,4))
-        colours = ['b', 'r']
-        acq_low = self.acquisition.evaluate(self.x_plot_low)
-        
-        acq_high = self.acquisition.evaluate(self.x_plot_high)
-        
-        plt.plot(self.x_plot_low[:, 0], acq_low, 'b', label='Low-fidelity')
-        plt.plot(self.x_plot_low[:, 0], acq_high, 'r', label='High-fidelity')
-        xnew = np.array([xnew])
-        fidelity_idx = int(xnew[0, -1])
-        plt.scatter(xnew[0, :-1], 
-                    self.acquisition.evaluate(xnew), 
-                    color=colours[fidelity_idx])
-        
-        plt.legend()
-        plt.title('Fidelity-Weighted Acquisition Function at Iteration {}'.format(self.iter))
-        plt.xlabel('x')
-        plt.xlim(0, 1)
-        plt.ylabel('Acquisition Value')
-        plt.tight_layout()
-        plt.show()
+        if self.ndim==1:
+            plt.figure(figsize=(6.5,4))
+            colours = ['b', 'r']
+            acq_low = self.acquisition.evaluate(self.x_plot_low)
+            
+            acq_high = self.acquisition.evaluate(self.x_plot_high)
+            
+            plt.plot(self.x_plot_low[:, 0], acq_low, 'b', label='Low-fidelity')
+            plt.plot(self.x_plot_low[:, 0], acq_high, 'r', label='High-fidelity')
+            xnew = np.array([xnew])
+            fidelity_idx = int(xnew[0, -1])
+            plt.scatter(xnew[0, :-1], 
+                        self.acquisition.evaluate(xnew), 
+                        color=colours[fidelity_idx])
+            
+            plt.legend()
+            plt.title('Fidelity-Weighted Acquisition Function at Iteration {}'.format(self.iter))
+            plt.xlabel('x')
+            plt.xlim(0, 1)
+            plt.ylabel('Acquisition Value')
+            plt.tight_layout()
+            plt.show()
+        if self.ndim==2:
+            fig, axes = plt.subplots(1, 2, figsize=(10, 5))
+            colours = ['b', 'r']
+            
+            acq_low = self.acquisition.evaluate(self.x_plot_low)
+            acq_high = self.acquisition.evaluate(self.x_plot_high)
+            
+            c1 = axes[0].contourf(self.X1, self.X2, acq_low.reshape(self.X1.shape), levels=50, cmap='viridis')
+            c2 = axes[1].contourf(self.X1, self.X2, acq_high.reshape(self.X1.shape), levels=50, cmap='viridis')
+            
+            cbar1 = fig.colorbar(c1, ax=axes[0], orientation='vertical', fraction=0.05, pad=0.1)
+            cbar1.set_label('Low-fidelity Acquisition function')
+
+            cbar2 = fig.colorbar(c2, ax=axes[1], orientation='vertical', fraction=0.05, pad=0.1)
+            cbar2.set_label('Multi-fidelity Acquisition function')
+            
+            xnew = np.array(xnew)
+            fidelity_idx = int(xnew[-1])
+            axes[fidelity_idx].scatter(xnew[0], 
+                        xnew[1], 
+                        color=colours[fidelity_idx], marker='*', s=220, label='next location')
+            axes[fidelity_idx].legend()
+            plt.suptitle('Acquisition Function at Iteration ' + str(self.iter))
+            axes[0].set_title('Low-fidelity')
+            axes[0].set_xlabel('x1')
+            axes[0].set_xlim(0, 1)
+            axes[0].set_ylabel('x2')
+            axes[1].set_title('Multi-fidelity')
+            axes[1].set_xlabel('x1')
+            axes[1].set_xlim(0, 1)
+            plt.tight_layout()
+            plt.show()
         
 
     
     def plot_optimization(self, label=None):
-        plt.figure(figsize=(7,4))
+        
         colours = ['b', 'r']
         is_high_fidelity = self.model.X[:, -1] == 1
         x_low = self.model.X[~is_high_fidelity, :-1]
         y_low = self.model.Y[~is_high_fidelity]
         x_high = self.model.X[is_high_fidelity, :-1]
         y_high = self.model.Y[is_high_fidelity]
-    
+        
         mean_low, var_low = self.model.predict(self.x_plot_low)
         mean_high, var_high = self.model.predict(self.x_plot_high)
         
-        xnew = self.model.X[[-1], :]
-        fidelity_idx = int(xnew[0, -1])
-        ynew = self.multifidelity.f[fidelity_idx](xnew[0,0])
-
-        if self.negate:
-            mean_low = -mean_low
-            mean_high = -mean_high
-            y_low = -y_low
-            y_high = -y_high
-            ynew = -ynew
-        
-        self.plot_with_error_bars(self.x_plot_high[:, :-1], mean_low, var_low, 'b', label='Low-fidelity GP')
-        self.plot_with_error_bars(self.x_plot_high[:, :-1], mean_high, var_high, 'r', label='High-fidelity GP')
-        plt.plot(self.x_plot, self.true_model, 'k--', label='True model')
-        plt.scatter(x_low, y_low, color='b')
-        plt.scatter(x_high, y_high, color='r')
+        if self.ndim==1:
+            plt.figure(figsize=(7,4))
+            
+            
+            xnew = self.model.X[[-1], :]
+            fidelity_idx = int(xnew[0, -1])
+            ynew = self.multifidelity.f[fidelity_idx](xnew[0,0])
     
-        plt.scatter(xnew[0, 0], 
-                    ynew, 
-                    color=colours[fidelity_idx], marker='*', s=420)
+            if self.negate:
+                mean_low = -mean_low
+                mean_high = -mean_high
+                y_low = -y_low
+                y_high = -y_high
+                ynew = -ynew
+            
+            self.plot_with_error_bars(self.x_plot_high[:, :-1], mean_low, var_low, 'b', label='Low-fidelity GP')
+            self.plot_with_error_bars(self.x_plot_high[:, :-1], mean_high, var_high, 'r', label='High-fidelity GP')
+            
+            if self.is_max:
+                plt.scatter(self.loc, self.max, color='k',  marker='*', s=120)
+                plt.plot(self.x_plot, self.true_model, 'k--', label='True model')
+            
+            plt.scatter(x_low, y_low, color='b')
+            plt.scatter(x_high, y_high, color='r')
         
-        plt.vlines(xnew[0,0], -15, ynew, linestyle='-.', linewidth=5, color=colours[fidelity_idx])
+            plt.scatter(xnew[0, 0], 
+                        ynew, 
+                        color=colours[fidelity_idx], marker='*', s=420)
+            
+            plt.vlines(xnew[0,0], -15, ynew, linestyle='-.', linewidth=5, color=colours[fidelity_idx])
+            
+            plt.legend()
+            if label:
+                plt.title('Fidelity-Weighted Optimization; ' + label)
+            else:
+                plt.title('Fidelity-Weighted Optimization; Iteration {}'.format(self.iter))
+            plt.xlim(0, 1)
+            #plt.ylim(-15,25)
+            plt.xlabel('x')
+            plt.ylabel('y');
+            plt.show()
         
-        plt.legend()
-        if label:
-            plt.title('Fidelity-Weighted Optimization; ' + label)
-        else:
-            plt.title('Fidelity-Weighted Optimization; Iteration {}'.format(self.iter))
-        plt.xlim(0, 1)
-        plt.ylim(-15,25)
-        plt.xlabel('x')
-        plt.ylabel('y');
-        plt.show()
 
-
-    def plot_acquisition2D(self, xnew):
-        fig, axes = plt.subplots(1, 2, figsize=(10, 5))
-        colours = ['b', 'r']
+        if self.ndim==2:
         
-        acq_low = self.acquisition.evaluate(self.x_plot_low)
-        acq_high = self.acquisition.evaluate(self.x_plot_high)
+            plt.figure(figsize=(8,6))
+            plt.contourf(self.X1, self.X2, mean_high.reshape(self.X1.shape), levels=50, cmap='viridis')
+            plt.colorbar(label="High-fidelity GP Mean")
+            plt.scatter(x_low[:, 0], x_low[:, 1], color='b', label='Low fidelity points')
+            plt.scatter(x_high[:, 0], x_high[:, 1], color='r', label='High fidelity points')
+            
+            if self.is_max:
+                plt.scatter(self.loc[0], self.loc[1], color='k',  marker='*', s=120, zorder=3)
         
-        c1 = axes[0].contourf(self.X1, self.X2, acq_low.reshape(self.X1.shape), levels=50, cmap='viridis')
-        c2 = axes[1].contourf(self.X1, self.X2, acq_high.reshape(self.X1.shape), levels=50, cmap='viridis')
-        
-        cbar1 = fig.colorbar(c1, ax=axes[0], orientation='vertical', fraction=0.05, pad=0.1)
-        cbar1.set_label('Low-fidelity Acquisition function')
-
-        cbar2 = fig.colorbar(c2, ax=axes[1], orientation='vertical', fraction=0.05, pad=0.1)
-        cbar2.set_label('Multi-fidelity Acquisition function')
-        
-        xnew = np.array(xnew)
-        fidelity_idx = int(xnew[-1])
-        axes[fidelity_idx].scatter(xnew[0], 
-                    xnew[1], 
-                    color=colours[fidelity_idx], marker='*', s=220, label='next location')
-        axes[fidelity_idx].legend()
-        plt.suptitle('Acquisition Function at Iteration ' + str(self.iter))
-        axes[0].set_title('Low-fidelity')
-        axes[0].set_xlabel('x1')
-        axes[0].set_xlim(0, 1)
-        axes[0].set_ylabel('x2')
-        axes[1].set_title('Multi-fidelity')
-        axes[1].set_xlabel('x1')
-        axes[1].set_xlim(0, 1)
-        plt.tight_layout()
-        plt.show()
-
-    def plot_optimization2D(self, label=None):
-        colours = ['b', 'r']
-        is_high_fidelity = self.model.X[:, -1] == 1
-        x_low = self.model.X[~is_high_fidelity, :-1]
-        #y_low = self.model.Y[~is_high_fidelity]
-        x_high = self.model.X[is_high_fidelity, :-1]
-        #y_high = self.model.Y[is_high_fidelity]
-    
-        mean_low, var_low = self.model.predict(self.x_plot_low)
-        mean_high, var_high = self.model.predict(self.x_plot_high)
-    
-        plt.figure(figsize=(8,6))
-        plt.contourf(self.X1, self.X2, mean_high.reshape(self.X1.shape), levels=50, cmap='viridis')
-        plt.colorbar(label="High-fidelity GP Mean")
-        plt.scatter(x_low[:, 0], x_low[:, 1], color='b', label='Low fidelity points')
-        plt.scatter(x_high[:, 0], x_high[:, 1], color='r', label='High fidelity points')
-    
-        xnew = self.model.X[[-1], :]
-        fidelity_idx = int(xnew[0, -1])
-        #ynew = self.multifidelity.f[fidelity_idx](xnew[0,:-1])
-        plt.scatter(xnew[:, 0], 
-                    xnew[:, 1], 
-                    color=colours[fidelity_idx], marker='*', s=220, label='next location')
-        plt.legend()
-        if label:
-            plt.title('Fidelity-Weighted Optimization; ' + label)
-        else:
-            plt.title('Fidelity-Weighted Optimization; Iteration {}'.format(self.iter))
-        plt.xlabel('x1')
-        plt.ylabel('x2');
-        plt.show()
+            xnew = self.model.X[[-1], :]
+            fidelity_idx = int(xnew[0, -1])
+            #ynew = self.multifidelity.f[fidelity_idx](xnew[0,:-1])
+            plt.scatter(xnew[:, 0], 
+                        xnew[:, 1], 
+                        color=colours[fidelity_idx], marker='*', s=220, label='next location')
+            plt.legend()
+            if label:
+                plt.title('Fidelity-Weighted Optimization; ' + label)
+            else:
+                plt.title('Fidelity-Weighted Optimization; Iteration {}'.format(self.iter))
+            plt.xlabel('x1')
+            plt.ylabel('x2');
+            plt.show()
 
     def plot_with_error_bars(self, x, mean, var, color, label):
             plt.plot(x, mean, color=color, label=label)
             plt.fill_between(x.flatten(), mean.flatten() - 1.96*var.flatten(), mean.flatten() + 1.96*var.flatten(), 
                             alpha=0.2, color=color)
 
-    def plot_model(self, figsize):
-        plt.figure(figsize=figsize)
-        x_low = self.x_array[self.x_array[:, 1] == 0][:, 0]
-        x_high = self.x_array[self.x_array[:, 1] == 1][:, 0]
-        y_low = self.y_array[self.x_array[:, 1] == 0]
-        y_high = self.y_array[self.x_array[:, 1] == 1]
-        mean_low, var_low = self.model.predict(self.x_plot_low)
-        mean_high, var_high = self.model.predict(self.x_plot_high)
-        
-        if self.negate:
-            mean_high = -mean_high
-            mean_low = -mean_low
-            y_high = -y_high
-            y_low = -y_low
+    def plot_model(self, figsize=(10,5)):        
+        if self.ndim==1:
+            plt.figure(figsize=figsize)
+            x_low = self.x_array[self.x_array[:, 1] == 0][:, 0]
+            x_high = self.x_array[self.x_array[:, 1] == 1][:, 0]
+            y_low = self.y_array[self.x_array[:, 1] == 0]
+            y_high = self.y_array[self.x_array[:, 1] == 1]
+            mean_low, var_low = self.model.predict(self.x_plot_low)
+            mean_high, var_high = self.model.predict(self.x_plot_high)
             
-        #plt.figure(figsize=FIG_SIZE)
-        self.plot_with_error_bars(self.x_plot_high[:, 0], mean_low, var_low, 'b', label='Low-fidelity GP')
-        self.plot_with_error_bars(self.x_plot_high[:, 0], mean_high, var_high, 'r', label='High-fidelity GP')
-        plt.plot(self.x_plot, self.true_model, 'k--')
-        plt.scatter(x_low, y_low, color='b')
-        plt.scatter(x_high, y_high, color='r')
-        plt.legend(['Low fidelity model', 'High fidelity model', 'True high fidelity'])
-        plt.title('Low and High Fidelity Models')
-        lb, ub = self.bounds
-        plt.xlim(lb, ub)
-        plt.xlabel('x')
-        plt.ylabel('y');
-        plt.show()
+            if self.negate:
+                mean_high = -mean_high
+                mean_low = -mean_low
+                y_high = -y_high
+                y_low = -y_low
+                
+            #plt.figure(figsize=FIG_SIZE)
+            self.plot_with_error_bars(self.x_plot_high[:, 0], mean_low, var_low, 'b', label='Low-fidelity GP')
+            self.plot_with_error_bars(self.x_plot_high[:, 0], mean_high, var_high, 'r', label='High-fidelity GP')
+            
+            if self.is_max:
+                plt.scatter(self.loc, self.max, color='k',  marker='*', s=120, label='True optimum')
+                plt.plot(self.x_plot, self.true_model, 'k--', label='True model')
+                
+            plt.scatter(x_low, y_low, color='b')
+            plt.scatter(x_high, y_high, color='r')
+            plt.legend(['Low fidelity model', 'High fidelity model', 'True high fidelity'])
+            plt.title('Low and High Fidelity Models')
+            lb, ub = self.bounds
+            plt.xlim(lb, ub)
+            plt.xlabel('x')
+            plt.ylabel('y');
+            plt.show()
+            
+        if self.ndim==2:
+            Z1 = self.multifidelity.f[0](self.x_plot)
+            Z2 = self.multifidelity.f[1](self.x_plot)
+
+            fig, axes = plt.subplots(1, 2, figsize=figsize)
+            c1 = axes[0].contourf(self.X1, self.X2, Z1.reshape(self.X1.shape), levels=50, cmap='viridis')
+            c2 = axes[1].contourf(self.X1, self.X2, Z2.reshape(self.X1.shape), levels=50, cmap='viridis')
+            
+            if self.is_max:
+                plt.scatter(self.loc[0], self.loc[1], color='k',  marker='*', s=120, label='True optimum')
+
+            cbar1 = fig.colorbar(c1, ax=axes[0], orientation='vertical', fraction=0.05, pad=0.1)
+
+            cbar2 = fig.colorbar(c2, ax=axes[1], orientation='vertical', fraction=0.05, pad=0.1)
+            plt.suptitle('Multifidelity Function')
+            axes[0].set_title('Low-fidelity')
+            axes[0].set_xlabel('x1')
+            axes[0].set_ylabel('x2')
+            axes[1].set_title('High-fidelity')
+            axes[1].set_xlabel('x1')
+            plt.tight_layout()
+            plt.show()
     
     def plot_results(self):
         colours = ['b', 'r']
