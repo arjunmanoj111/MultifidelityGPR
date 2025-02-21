@@ -132,7 +132,7 @@ generator = np.random.RandomState(12345)
 
 E0 = 1 # initial concentration of enzyme
 C0 = np.array([5.0, 0.0, 0.0, 0.0, 0.0, E0]) # initial concentrations of S0, ES0, ES1, S1, S2, E
-time_points = np.linspace(0, 20, num_steps + 1)
+# time_points = np.linspace(0, 20, num_steps + 1)
 delta_k = 0.1 # relative half-width of rate constant perturbations
 
 exact_t = []
@@ -328,7 +328,7 @@ for i in range(len(Elist)):
     C0 = np.array([5, 0.0, 0.0, E0]) # Initial concentrations of S0, ES0, ES1, S1, S2, E
     
     sol1 = solve_ivp(lambda t, x: toyModel(t, x, kvals), 
-                         [0, 100], 
+                         [0, 10], 
                          C0,
                          # t_eval=time_points, 
                          atol=np.sqrt(np.finfo(float).eps), 
@@ -336,15 +336,17 @@ for i in range(len(Elist)):
     
     
     sol2 = solve_ivp(lambda t, x: reducedToyModel(t, x, kvals), 
-                         [0, 100], 
+                         [0, 10], 
                          C0[:2],
                          # t_eval=time_points, 
                          atol=np.sqrt(np.finfo(float).eps), 
                          rtol=np.sqrt(np.finfo(float).eps))
     
-    exact_t.append(sol1.t[np.argmin(abs(sol1.y[2,:] - 0.67*S0))])
-    qssa_t.append(sol2.t[np.argmin(abs(sol2.y[1,:] - 0.67*S0))])
+    # exact_t.append(sol1.t[np.argmin(abs(sol1.y[2,:] - 0.67*S0))])
+    # qssa_t.append(sol2.t[np.argmin(abs(sol2.y[1,:] - 0.67*S0))])
     
+    exact_t.append(0.2*abs(sol1.y[2,-1] - 0.67*S0))
+    qssa_t.append(0.2*abs(sol2.y[1,-1] - 0.67*S0))
 
 #%%
 
@@ -354,11 +356,14 @@ plt.rcParams.update({
 })
 
 plt.figure(figsize=(10,7))
-plt.plot(Elist, abs(10 - np.array(exact_t)), label='High-fidelity model', lw=4)
-plt.plot(Elist, abs(10 - np.array(qssa_t)), label='Low-fidelity model', linestyle='-.', lw=4)
+# plt.plot(Elist, abs(10 - np.array(exact_t)), label='High-fidelity model', lw=4)
+# plt.plot(Elist, abs(10 - np.array(qssa_t)), label='Low-fidelity model', linestyle='-.', lw=4)
+plt.plot(Elist, np.array(exact_t), label='High-fidelity model', lw=4)
+plt.plot(Elist, np.array(qssa_t), label='Low-fidelity model', linestyle='-.', lw=4)
 plt.legend(fontsize=15)
 plt.xlabel('Enzyme concentration', fontsize=16)
-plt.ylabel('Time (s)', fontsize=16)
+plt.ylabel('| RC - 0.67 |', fontsize=16)
+plt.xlim(0, 1.2)
 # plt.title('Minimum enzyme concentration for 67% completion in 10s', fontsize=20)
 
 
